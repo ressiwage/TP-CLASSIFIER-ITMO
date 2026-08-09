@@ -35,4 +35,5 @@ uvicorn main:app --reload
     - откуда цифры? см. docs/product.md
 
 ## демо
+[если не показывается](2026-08-09 18-52-45.mp4)
 <video controls src="2026-08-09 18-52-45.mp4" title="Title"></video>
