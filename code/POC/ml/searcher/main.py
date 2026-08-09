@@ -27,6 +27,7 @@ class Searcher:
         return data
     
     def __call__(self, query, top_k=3):
+        '''выдаёт: [(question:str, answer:str, confidence:str),...], confidence>THRESHOLD'''
         q_emb = self.model.encode([query], normalize_embeddings=True)[0]
         sims = self.embeddings @ q_emb  # т.к. векторы нормированы, dot = cosine
         top_idx = np.argsort(sims)[::-1][:top_k]

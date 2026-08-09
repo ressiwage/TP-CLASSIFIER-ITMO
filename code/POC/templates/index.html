@@ -1,0 +1,33 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Обработка тикета</title>
+</head>
+<body style="font-family: sans-serif; max-width: 700px; margin: 40px auto;">
+    <h2>Тикет поддержки</h2>
+
+    <form method="post" action="/">
+        <textarea name="text" rows="4" style="width: 100%;" placeholder="Введите текст обращения...">{{ text or "" }}</textarea>
+        <br><br>
+        <button type="submit">Отправить</button>
+    </form>
+
+    {% if result %}
+    <hr>
+    <h3>Результат</h3>
+    <p><b>Критичность:</b> {{ result.criticity.category }} (confidence: {{ result.criticity.confidence }})</p>
+    <p><b>Действие:</b> {{ result.result.action }}</p>
+
+    {% if result.result.action == "send_to_operator" %}
+        <p style="color: red;">{{ result.result.message }}</p>
+    {% elif result.result.action == "reply_static" %}
+        <p style="color: green;">{{ result.result.message }}</p>
+    {% elif result.result.action == "reply_llm" %}
+        <p><i>Промпт, отправленный в LLM (заглушка):</i></p>
+        <pre style="background: #f4f4f4; padding: 10px; white-space: pre-wrap;">{{ result.result.prompt_sent_to_llm }}</pre>
+    {% endif %}
+    {% endif %}
+</body>
+</html>
