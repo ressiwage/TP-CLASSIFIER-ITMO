@@ -1,5 +1,5 @@
 # parse
-
+import time as t
 import re
 
 def load_dataset(path):
@@ -16,10 +16,11 @@ def load_dataset(path):
                 data.append({"label": label, "question": question, "answer": answer})
     return data
 
-data = load_dataset("data.txt")
+data = load_dataset("../questions.txt")
 print(len(data), data[0])
 
 # embed
+s = t.time()
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
@@ -27,7 +28,8 @@ model = SentenceTransformer("cointegrated/rubert-tiny2")
 
 questions = [d["question"] for d in data]
 embeddings = model.encode(questions, normalize_embeddings=True)  # (N, dim)
-
+print(f'[LOG] время на инициализацию: {t.time()-s:.3f}s')
+s=t.time()
 # search
 def search(query, top_k=3):
     q_emb = model.encode([query], normalize_embeddings=True)[0]
@@ -47,7 +49,7 @@ print(q_2)
 results = search(q_2)
 for q, a, score in results:
     print(f"{score:.3f} | {q}")
-
+print(f'[LOG] время на 2 вопроса: {t.time()-s:.3f}s')
 # search w THRESHOLD
 
 THRESHOLD = 0.75  # калибруется на валидации ниже
