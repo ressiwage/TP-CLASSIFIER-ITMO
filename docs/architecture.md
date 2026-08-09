@@ -11,6 +11,8 @@
 
 ![alt text](containers.drawio.svg)
 
+![alt text](image.png)
+
 - decoder-api -- артефакт прошлой работы, мысленно заменим его на ml-api.
 
 ml-api -- контейнер с тяжелыми вычислениями. 
