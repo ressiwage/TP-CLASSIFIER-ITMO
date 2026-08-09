@@ -1,0 +1,248 @@
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import selectinload
+from sqlalchemy import String, select
+import hashlib
+import secrets
+import os
+import redis.asyncio as aioredis
+from nats.js import JetStreamContext
+from nats.aio.client import Client
+from contextlib import asynccontextmanager
+from _shared._common.models.models import UserLogin, UserRegister, RefreshRequest, Base, User, Archives, Videos
+from _shared._common.db.relational import engine, SessionLocal, get_db, get_db_
+from _shared._common.db.redis import redis_client, REDIS_URL
+from _shared._common.db.nats import js_connect
+from fastapi.middleware.cors import CORSMiddleware
+import random
+
+
+# ACCESS_TOKEN_TTL — время жизни access-токена в секундах (15 минут)
+ACCESS_TOKEN_TTL = int(os.getenv("ACCESS_TOKEN_TTL", 900))
+
+
+nc: Client|None = None
+js: JetStreamContext | None = None
+
+
+# ─── Lifespan ─────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global redis_client, nc, js
+
+    # Инициализация БД
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Инициализация Redis
+    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+
+    # Инициализация NATS + JetStream
+    js, nc = await js_connect()
+
+    # Создаём stream если не существует (базовый пример)
+    try:
+        await js.find_stream_name_by_subject("events.>")
+    except Exception:
+        await js.add_stream(name="events", subjects=["events.>"])
+
+    # Публикуем тестовое сообщение при старте
+    await js.publish("events.startup", b"service started")
+
+    yield
+
+    # Cleanup
+    await redis_client.aclose()
+    await nc.drain()
+
+
+app = FastAPI(lifespan=lifespan)
+security = HTTPBearer()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # или ["*"] для дев
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+):
+    token = credentials.credentials
+
+    # 1. Сначала смотрим в Redis (быстрый путь)
+    cached_user_id = await redis_client.get(f"access:{token}")
+    if cached_user_id:
+        # Достаём username из второго ключа
+        username = await redis_client.get(f"user_id:{cached_user_id}:username")
+        if username:
+            return {"id": int(cached_user_id), "username": username}
+
+    # 2. Промах кэша — идём в БД
+    result = await db.execute(
+        select(User).where(User.access_token == token)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Прогреваем кэш для следующих запросов
+    await redis_client.setex(f"access:{token}", ACCESS_TOKEN_TTL, user.id)
+    await redis_client.setex(f"user_id:{user.id}:username", ACCESS_TOKEN_TTL, user.name)
+
+    return {"id": user.id, "username": user.name}
+
+
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
+@app.post("/register")
+async def register(body: UserRegister, db: AsyncSession = Depends(get_db)):
+    user = User(
+        id = str(random.randint(10**35, 10**36-1)),
+        name=body.username, 
+        pwd_hash=hash_password(body.password),
+        n_mail = False, n_phone = False, n_TG = False,
+        cn_mail = False, cn_phone = False, cn_TG = False
+        )
+    db.add(user)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise e
+        raise HTTPException(status_code=400, detail="User already exists")
+    return {"status": "ok"}
+
+
+@app.post("/login")
+async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(User).where(
+            User.name == body.username,
+            User.pwd_hash == hash_password(body.password),
+        )
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    access_token = secrets.token_urlsafe(32)
+    refresh_token = secrets.token_urlsafe(48)
+
+    # Инвалидируем старый access-токен в Redis если был
+    if user.access_token:
+        await redis_client.delete(f"access:{user.access_token}")
+
+    user.access_token = access_token
+    user.refresh_token = refresh_token
+    await db.commit()
+
+    # Кэшируем новый access-токен
+    await redis_client.setex(f"access:{access_token}", ACCESS_TOKEN_TTL, user.id)
+    await redis_client.setex(f"user_id:{user.id}:username", ACCESS_TOKEN_TTL, user.name)
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_TTL,
+    }
+
+
+@app.post("/refresh")
+async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    """Обменивает refresh_token на новую пару токенов."""
+    result = await db.execute(
+        select(User).where(User.refresh_token == body.refresh_token)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    # Инвалидируем старый access-токен в Redis
+    if user.access_token:
+        await redis_client.delete(f"access:{user.access_token}")
+
+    new_access = secrets.token_urlsafe(32)
+    new_refresh = secrets.token_urlsafe(48)
+
+    user.access_token = new_access
+    user.refresh_token = new_refresh
+    await db.commit()
+
+    await redis_client.setex(f"access:{new_access}", ACCESS_TOKEN_TTL, user.id)
+    await redis_client.setex(f"user_id:{user.id}:username", ACCESS_TOKEN_TTL, user.name)
+
+    return {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_TTL,
+    }
+
+
+@app.post("/logout")
+async def logout(
+    current_user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+):
+    token = credentials.credentials
+    await redis_client.delete(f"access:{token}")
+    await redis_client.delete(f"user_id:{current_user['id']}:username")
+
+    result = await db.execute(select(User).where(User.id == current_user["id"]))
+    user = result.scalar_one_or_none()
+    if user:
+        user.access_token = None
+        user.refresh_token = None
+        await db.commit()
+
+    return {"status": "ok"}
+
+
+@app.get("/user")
+async def get_user(current_user: dict = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/videos")
+async def get_videos(current_user: dict = Depends(get_current_user), db = Depends(get_db_)):
+    result = await db.execute(
+        select(Archives).options(selectinload(Archives.videos))
+    )
+    archives = result.scalars().all()
+    return {
+        'archives': [
+            
+                {**{k: v for k, v in r.__dict__.items() if not k.startswith('_')},
+                'videos': [
+                    {k: v for k, v in video.__dict__.items() if not k.startswith('_')}
+                    for video in r.videos
+                ]}
+            
+            for r in archives
+        ]
+    }
+    return {'archives':{r.id:r.__dict__ for r in (await db.execute(select(Archives))).scalars().all()},
+            'videos': [r.__dict__ for r in (await db.execute(select(Videos))).scalars().all()]}
+    return {"archive_1": ["video_1", "video_2"], "archive_2": ["video_3"]}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return RedirectResponse(url="/docs/", status_code=307)
