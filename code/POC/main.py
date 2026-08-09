@@ -11,9 +11,9 @@ app = FastAPI()
 T = 3  # порог критичности для эскалации
 
 # грузим модели один раз при старте приложения, не на каждый запрос
-classifier = Classifier()
-searcher_broad = Searcher(THRESHOLD=0.5)   # для R: широкий поиск, K=5
-searcher_strict = Searcher(THRESHOLD=0.9)  # для R1: строгий поиск для reply_static
+classifier = Classifier(data_path='ml/criticity.txt')
+searcher_broad = Searcher(THRESHOLD=0.5,  data_path='ml/questions.txt')   # для R: широкий поиск, K=5
+searcher_strict = Searcher(THRESHOLD=0.9, data_path='ml/questions.txt')  # для R1: строгий поиск для reply_static
 
 
 class TicketRequest(BaseModel):
