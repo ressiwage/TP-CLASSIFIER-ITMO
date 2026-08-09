@@ -5,7 +5,7 @@ from typing import Tuple
 from db.dependencies import get_redis, get_db_
 from repositories.otp_repository import OtpRepository
 from repositories.status_repository import StatusRepository
-from services.video_service import VideoService, semaphore
+from services.video_service import MlService, semaphore
 from _shared._common.db.nats import js_connect
 from core.config import DAV1D_PATH
 
@@ -16,8 +16,8 @@ def get_otp_repo(redis=Depends(get_redis)) -> OtpRepository:
     return OtpRepository(redis)
 
 
-def get_video_service() -> VideoService:
-    return VideoService()
+def get_video_service() -> MlService:
+    return MlService()
 
 def get_status_repo(redis=Depends(get_redis), db=Depends(get_db_)) -> StatusRepository:
     return StatusRepository(redis, db)
@@ -26,7 +26,7 @@ async def _process_upload(
     file: UploadFile,
     token: str,
     otp_repo: OtpRepository,
-    video_service: VideoService,
+    video_service: MlService,
     status_repo: StatusRepository,
     in_memory: bool = True,
 ) -> Response:
@@ -61,7 +61,7 @@ async def upload_video(
     file: UploadFile = File(...),
     token: str = Query(...),
     otp_repo: OtpRepository = Depends(get_otp_repo),
-    video_service: VideoService = Depends(get_video_service),
+    video_service: MlService = Depends(get_video_service),
     status_repo: StatusRepository = Depends(get_status_repo)
 ):
     return await _process_upload(file, token, otp_repo, video_service, status_repo, in_memory=True)
@@ -72,7 +72,7 @@ async def upload_video_disk(
     file: UploadFile = File(...),
     token: str = Query(...),
     otp_repo: OtpRepository = Depends(get_otp_repo),
-    video_service: VideoService = Depends(get_video_service),
+    video_service: MlService = Depends(get_video_service),
     status_repo: StatusRepository = Depends(get_status_repo)
 ):
     return await _process_upload(file, token, otp_repo, video_service, status_repo, in_memory=False)

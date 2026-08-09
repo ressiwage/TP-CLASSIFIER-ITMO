@@ -14,7 +14,7 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
-class VideoService:
+class MlService:
 
     async def _run_ffmpeg(self, input_obu_path: str, output_mp4_path: str) -> None:
         """Двухэтапный вариант: dav1d -> y4m (на диск) -> ffmpeg (scale + h264)"""
